@@ -1,0 +1,544 @@
+package cremul_import "Functions to read and import CREMUL data into database tables. ";
+
+/*
+
+The functions below are used to create SQL insert VALUES part that is put into arrays in the main function. 
+The arrays are then merged with a comma separator to be all inserted in one single INSERT INTO SQL command. One for each file. 
+
+*/
+
+/*
+
+	Create the MessageHeader values for one Header record. 
+	
+*/
+function createMessageHeader ( string MessageRef, date MessageDate, string FilePath )
+	string FileName = regex_replace("^(.+)/(.+\..+)$", FilePath, "\2");
+	string ImpBy = $$sys_signatur;
+	string TimeStampNow = string ( now()+3600, "%Y-%m-%d %H:%M:%S"); 
+	string data = format ( "('%s',DATE '%s', '%s', '%s', TIMESTAMP '%s', '%s')", 
+		MessageRef, string (MessageDate, "%Y-%m-%d" ), FileName, FilePath, TimeStampNow, ImpBy); 
+	return data; 
+end
+/*
+
+	Create the LIN values for one LIN record
+	
+*/
+function createSequenceLIN ( string MessageRef, int LIN, date ProcDate, 
+				string BUSCat, float SeqAm, string SEQBankRef, date valDate, string RecAccNo)
+	string data = format ( "('%s',%d, DATE '%s', '%s', %.4f,'%s',DATE '%s','%s')", 
+		MessageRef, LIN, string (ProcDate, "%Y-%m-%d" ),BUSCat, SeqAm, SEQBankRef, 
+		string (valDate, "%Y-%m-%d" ), RecAccNo); 
+	return data; 
+end
+/*
+
+	Create the transaction Values record for one transaction. 
+	
+*/
+function createTransaction ( string MessageRef, int LIN, int seq, date recDate, string ArcRef, string OppdragRef, 
+		float transfAm, string PayerAccNo,  string PayerName, string Freetext, string INP, int Proc, string DocRef, 
+		float ProcAm, int genInd, string NADPL, string KID)
+		
+	if ( PayerName == "" ) then
+		PayerName = NADPL; 
+	end if
+	string KidRegex = InvoiceHeader_Preferences::KidExtractInvocieNumberRegex; 
+	string InvoiceNumber; 
+	if ( KID == "") then
+		InvoiceNumber = "NULL"; 
+	else
+		InvoiceNumber = regex_replace ( KidRegex, KID, "\1");
+	end if
+	string data = format ( "('%s',%d, %d, DATE '%s', '%s', '%s', %.4f, '%s', '%s', '%s', '%s', %d, '%s', %.4f, %d, '%s', %s, 'CREMUL', '%s')",  
+		MessageRef, LIN, seq, string (recDate, "%Y-%m-%d" ), ArcRef, OppdragRef, 
+		transfAm, PayerAccNo,  PayerName, Freetext, INP, Proc, DocRef, 
+		ProcAm, genInd, KID, InvoiceNumber, $$sys_signatur); 
+	return data; 
+end
+/*
+
+	Function to use in data viewer to test the regex for extracting invoice number from KID. 
+	
+*/
+function test_kid (string KID)
+	string KidRegex = InvoiceHeader_Preferences::KidExtractInvocieNumberRegex; 
+	string InvoiceNumber = regex_replace ( KidRegex, KID, "\1");
+	return format ( "KID:%s, Fakturanr: %s - Regex: %s", KID, InvoiceNumber, KidRegex); 
+end
+
+
+/*
+
+Helper functions to facilitate some operations in the main function. 
+
+*/
+
+function assert ( string value, string v1, string v2, string message)
+	if (value == v1 || value == v2 ) then
+		return true; 
+	else
+		throw "ERROR Assert " + message + " value: " + value; 
+	end if
+	return false; 
+end
+/*
+
+	Used from the various DTM code variants. Return a date value based on format qualifier. 
+	
+*/
+function getDate (string datevalue, string formatcode ) 
+	date dateval;  
+	bool b1 = assert (formatcode, "102", "203", "Invalid formatcode in DTM, should be 102 or 203, is: " ); 
+	if ( formatcode == "102") then
+		dateval = date (datevalue, "%Y%m%d" ); 
+	elseif ( formatcode == "203" ) then
+		dateval = date (left ( datevalue, 8 ) , "%Y%m%d" );
+	end if
+
+	return dateval; 
+end
+/*
+
+	Convert a number from format with comma as decimal point to a float ( double ) value. 
+	
+*/
+function getAmounth ( string number ) 
+	double xx = double ( substitute (number, ",", ".")); 
+	return xx; 
+end
+
+/*
+
+ Use this function to explain the BUScat codes. Can be used from a field calculation to return the human readable category. 
+  remember: As unstored calc, returning text. 
+
+*/
+
+function GetBUScatText (string BUScat)
+	functionID 290; 
+	//
+	string cat1 = left ( BUScat, 2); 
+	
+	string text = ""; 
+	if ( cat1 == "DO") then 
+		text += "Innland, "; 
+	elseif ( cat1 == "IN") then
+		text += "Utland, "; 
+	else
+		return BUScat; 
+	end if
+	string cat = right ( BUScat, 3); 
+	if ( cat == "230" ) then
+		text +="Gyldig KID";
+	elseif ( cat == "231" ) then
+		text +="Ugyldig KID";
+	elseif ( cat == "232" ) then
+		text +="Autogiro";
+	elseif ( cat == "233" ) then
+		text +="Elektroniske betalinger";
+	elseif ( cat == "234" ) then
+		text +="Giro Notes";
+	elseif ( cat == "240" ) then
+		text +="Structured information";
+	elseif ( cat == "BKT" ) then
+		text +="Bank interne transaksjoner";
+	else
+		return BUScat; 
+	end if
+	return text; 
+end
+
+
+/*
+
+Here is the main function. It can be called with a file-path to the CREMUL file, OR use the 
+import_cremul_select_file () in the bottom to get a select dialogue to pick the file. 
+
+*/
+
+function import_cremul ( string filename )
+
+	int x = open ( filename, "r"); // Plugins Exception handler handles any error and abort 
+									// the functions returning a proper error message back to FileMaker.  
+	// Seems like the file is in ISO-8859-1 format. 
+	// string cremul_data =  read ( x ); 
+	string cremul_data = to_utf ( read ( x ), "ISO-8859-1"); 
+	close ( x ) ; 
+	
+
+/*
+Each segment is terminated by a single aphostrophe ('). The file can contain several segments on one line. 
+Remove all the line-separator (CR / LF) to get a long string of segments each terminated by the ('). 
+Then - split in a array of segments to parce each one on a loop. 
+	
+*/ 
+	// Clean and split the file in segments. 
+	cremul_data = substitute ( cremul_data, "\r", ""); 
+	cremul_data = substitute ( cremul_data, "\n", ""); 
+	cremul_data = substitute ( cremul_data, "\t", ""); 
+	
+	array string cremul_segments = explode ( "'", cremul_data); 
+	
+	array string subsegs, subsub; 
+	
+	array string dataMH, dataSQ, dataTR, KIDs, References; // The data arrays for the table data in SQL VALUES format. To be inserted in tables at the end. 
+	
+	int noSegments = sizeof (cremul_segments ); 
+	bool b1; 
+	
+	string MessageIdentifier, UniqueMessageNumber, BUScat, refPostingACK, refCT, refArchive, refOrderNumber,
+	receivingAccountNumber, payersAccountNumber, PayersName,
+	NAD_MR, NAD_PL, INP, FriTekst, KID; 
+	
+	date DocumentDate, ReceivedDate, ProcessedDate, ValueDate, NETSProcessingDate, PostingDate; 
+	
+	float totalAmount, transactionAmount; // float are doubles in ACF - really. 
+	
+	int segNo, noSubSegs, currentMessageStart, LevB_LIN, sequence; 
+	
+	string subSegStart; 
+	
+	for ( segNo = 1, noSegments )
+		if ( cremul_segments[segNo] != "") then
+		print "\n" + segNo + ": "+ cremul_segments[segNo]; 
+			subsegs = explode ( "+", cremul_segments[segNo]); 
+			noSubSegs = sizeof ( subsegs ); 
+			subSegStart = subsegs[1]; 
+			subSegStart = regex_replace ( "^(\\s|\\n|\\r)*(.*)(\\s|\\n|\\r)*$",subSegStart, "\2"); 
+			
+			if ( subSegStart == "UNH" ) then  // Start of Message.
+				// UNH+1+CREMUL:D:96A:UN
+				MessageIdentifier = subsegs[2]; 
+				currentMessageStart = segNo; 
+				if ( subsegs[3] != "CREMUL:D:96A:UN") then
+					throw "Cremul document is not according to standard: CREMUL:D:96A:UN, but instead: " 
+						+ subsegs[3] + " Contact ProgramDesign to update CREMUL Import to this standard."; 
+				end if
+			elseif (left(subSegStart,3) == "UNA" ) then
+			// UNA:+.?
+			// We ignore this code at the moment (At the very beginning og the file)
+			elseif (subSegStart == "UNB" ) then
+			// UNB+UNOC:1+00810506482+00900831941+990512:1423+1293++++0 ( Next to UNA )
+			// We ignore this code at the moment 
+			elseif (subSegStart == "UNZ" ) then	
+			// UNZ+1+1293
+			// We ignore this code at the moment (At end of file)
+			elseif (MessageIdentifier == "" ) then
+				throw "ERROR cremul file lacks Message identifier"; 
+				
+			elseif (subSegStart == "BGM") then	// Beginning of message
+				// BGM+435+1999090813150001
+				UniqueMessageNumber = subsegs[3];
+				References[] = UniqueMessageNumber; 
+				b1 = assert ( subsegs[2], "435", "455", "BGM Header invalid code, should be 435 or 455, is: "); 
+				stmp1 = ExecutesQL ( format("SELECT Count(*) FROM PaymentMessage WHERE MessageRef='%s'", UniqueMessageNumber) ) ; 
+				if ( int (stmp1) > 0) then
+					throw "ERROR Denne filen har allerede blitt innlest"; 
+				end if
+				
+			elseif (subSegStart == "DTM") then
+				// DTM+137:19970303:102
+				// DTM+137:200003031208:203
+				subsub = explode ( ":", subsegs[2]); 
+				if (subsub[1]== "137" ) then
+					DocumentDate = getDate (subsub[2], subsub[3] ); 
+				elseif ( subsub[1]== "171" ||  subsub[1]== "9") then 
+					NETSProcessingDate = getDate (subsub[2], subsub[3] ); 
+				elseif ( subsub[1]== "202" ) then  
+					PostingDate = getDate (subsub[2], subsub[3] );
+				elseif ( subsub[1]== "203" ) then  
+					ReceivedDate = getDate (subsub[2], subsub[3] );
+				elseif ( subsub[1]== "193" ) then  
+					ProcessedDate = getDate (subsub[2], subsub[3] );
+				elseif ( subsub[1]== "209" ) then  
+					ValueDate = getDate (subsub[2], subsub[3] );
+				else
+					throw "Invalud DTM Date Qualifier: " + subsub[1]; 
+				end if
+				
+			elseif (subSegStart == "LIN") then
+				// Starts level B ( Sequence numbers unique inside this level. )
+				// If sequence number set, flush transactions as we start on a new B segment. 
+				// LIN+1
+				
+				if ( LevB_LIN != 0) then
+					dataTR[] = createTransaction ( UniqueMessageNumber, LevB_LIN, sequence, ReceivedDate, 
+						refArchive, refOrderNumber, 
+						transactionAmount, payersAccountNumber,  PayersName, FriTekst, INP, 0, "", 
+						0.0, 0, NAD_PL, KID); 
+					sequence = 0; 	
+					
+					transactionAmount = 0.0; 
+					refArchive = ""; 		
+					refOrderNumber = ""; 
+					payersAccountNumber = ""; 
+					PayersName = ""; 
+					NAD_PL = ""; 
+					FriTekst = ""; 
+					KID = ""; 
+					INP = ""; 
+					
+				end if
+				LevB_LIN = subsegs[2]; 
+			elseif (subSegStart == "CNT") then	
+			// CNT+LI:5	
+			// We have other methods to catch this event. A segment identifying the end of level B and the total number of LIN - segments in group 4.
+				
+			elseif (subSegStart == "BUS") then
+				// BUS++DO++230:25:124
+				subsub = explode ( ":", subsegs[5]); 
+				BUScat = subsegs[3]+"."+subsub[1]; 
+			elseif (subSegStart == "MOA") then
+				// MOA+349:124113,53
+				subsub = explode ( ":", subsegs[2]); 
+				if ( subsub[1] == "60" || subsub[1] == "346" || subsub[1] == "349" || subsub[1] == "362") then
+					totalAmount = getAmounth (subsub[2]); 
+				elseif ( subsub[1] == "143" || subsub[1] == "98") then
+					transactionAmount = getAmounth (subsub[2]);
+				else
+				end if 
+/* TODO: Find the use of those codes...
+36 (Converted amount) 
+60 (Final (posted) amount)
+98 (Original amount – the original amount to be paid)
+119 (Received amount)
+143 (Transfer amount) */
+				
+			elseif (subSegStart == "RFF") then
+				// RFF+ACK:00430409720 - (Bank reference – posted amount)
+				// RFF+CT:001005001 - (AutoGiro agreement ID)
+				// RFF+ACD:*94011106 - (Bank reference = Archive reference. The customer should tell the 
+					// archive reference to the bank if the customer has questions about a specific transaction)
+				// RFF+AEK:6011489652 - (Payment order number. Bankgiro note number is unique. The
+					// number does not have to be unique when other payment instruments are used)
+				subsub = explode ( ":", subsegs[2]); 	
+				if ( subsub[1] == "ACK") then
+					refPostingACK = subsub[2]; 
+				elseif ( subsub[1] == "CT" ) then
+					refCT = subsub[2];
+				elseif ( subsub[1] == "ACD" ) then
+					refArchive = subsub[2];
+				elseif ( subsub[1] == "AEK" ) then
+					refOrderNumber = subsub[2];
+				else
+					// Other refs: ABO, ACK, AFO, AGN, AHK, RA, TBR
+					// Investigate the use of those. 
+				end if
+			elseif (subSegStart == "FII") then
+				// FII+BF+12345678901 - Kontnummer til mottaker
+				// FII+OR+36251403893 - Betalt fra konto
+				// FII+OR+23510524047:Jenny Petterson
+				subsub = explode ( ":", subsegs[3]);
+				if ( subsegs[2] == "BF") then
+					receivingAccountNumber = subsub[1]; 
+				elseif  ( subsegs[2] == "OR") then
+					payersAccountNumber = subsub[1]; 
+					if ( sizeof ( subsub ) > 1) then
+						PayersName =  subsub[2] ; 
+					else
+						PayersName = ""; 
+					end if
+				else
+					// no other known codes....
+				end if
+
+					
+				
+			elseif (subSegStart == "SEQ") then
+				// Start a new sequence
+				// Flush old values to payment table, if sequence is different than 0. 
+				// SEQ++1
+				// Within same level B (starts with the LIN-segment), the first underlaying transaction on level C
+				// starts with SEQ+1, the second transaction starts with SEQ+2, the third transaction starts with SEQ+3 etc.
+ 				// (Data element 1050 Sequence number)
+				
+				
+				
+				if ( sequence != 0 ) then
+					// flush previous transaction, empty trans data. 
+					dataTR[] = createTransaction ( UniqueMessageNumber, LevB_LIN, sequence, ReceivedDate, 
+							refArchive, refOrderNumber, 
+							transactionAmount, payersAccountNumber,  PayersName, FriTekst, INP, 0, "", 
+							0.0, 0, NAD_PL, KID);
+							
+					transactionAmount = 0.0; 
+					refArchive = ""; 		
+					refOrderNumber = ""; 
+					payersAccountNumber = ""; 
+					PayersName = ""; 
+					NAD_PL = ""; 
+					FriTekst = ""; 
+					KID = ""; 
+					INP = ""; 
+		
+				end if
+				
+				sequence = int( subsegs[3] ); 
+				
+				if (sequence == 1 ) then
+					if ( LevB_LIN == 1) then 
+						// Flush the message header
+						dataMH[] = createMessageHeader ( UniqueMessageNumber, DocumentDate, filename ); 
+				   	end if
+
+				   // Flush the LIN header
+				   dataSQ[] = createSequenceLIN ( UniqueMessageNumber, LevB_LIN, NETSProcessingDate, 
+					   BUScat, totalAmount, refPostingACK, ValueDate, receivingAccountNumber); 
+				
+				end if
+				
+			
+			elseif (subSegStart == "NAD") then
+				// Name and address (M1)
+				// NAD+MR+00123456789-001234567 - Mottakers ORG nummer
+				// NAD+PL+++Bjarne Frogner AS++Asker++1370 - Beatlers detaljer: 
+				// NAD+PL+++Erik Jensen
+				// NAD_MR, NAD_PL
+				if ( subsegs[2] == "MR" ) then
+					// Mottaker
+					NAD_MR = subsegs[3] ; 
+				elseif ( subsegs[2] == "PL" ) then
+					// Betaler
+					// NAD+PL++Peter Man¯ Juul:Stasjonsveien 64::0771 OSLO'
+					
+					if ( noSubSegs < 5 ) then
+						// NAD+PL++Peter Man¯ Juul:Stasjonsveien 64::0771 OSLO'
+						NAD_PL = subsegs[4] ;
+					else
+						// NAD+PL+++STIFTELSEN NORGES GEOTEKNISKE+POSTBOKS 3930  ULLEV≈L STADION+OSLO++0806'
+						NAD_PL = subsegs[5] ;
+					end if
+				end if
+				
+				
+			elseif (subSegStart == "INP") then
+				// Instruction to parties (M 1)
+				// INP+BF+2:SI
+				subsub = explode ( ":", subsegs[3]);
+				INP = subsub[2]; 
+			
+			elseif (subSegStart == "FTX") then
+				// Free text (C 1)
+				// FTX+REG++14+Import of Toyota-cars
+				// FTX+AAG+++Tandberg Data
+				FriTekst = subsegs[5]; 
+				
+			elseif (subSegStart == "PRC") then
+				// PRC Process identification
+				// Not in NETS documentation
+				
+			elseif (subSegStart == "DOC") then
+				// Document/message details 
+				// Not in NETS documentation Den Danske Bank har ref på dette. her ligger KID
+				// DOC+999+0000773500050154208143212
+				if ( subsegs[2] == "999") then
+					KID = subsegs[3]; 
+					KIDs[] = subsegs[3]; 
+				end if
+				
+				
+			elseif (subSegStart == "GIS") then
+				// General indicator (M 1)
+				// GIS+10 -  (Declaration is nessecary)
+			elseif (subSegStart == "UNT") then
+				// Message trailer (M 1)
+				// UNT+25+1
+				if ( int ( subsegs[2] ) != segNo - currentMessageStart + 1 ) then
+					throw "Number of lines in Message does not comform with the message trailer: " + subsegs[2] 
+						+ "/" + (segNo - currentMessageStart + 1) + " / MessageID:" + UniqueMessageNumber; 
+				end if
+				
+				// Add the last transaction...
+				dataTR[] = createTransaction ( UniqueMessageNumber, LevB_LIN, sequence, ReceivedDate, 
+						refArchive, refOrderNumber, 
+						transactionAmount, payersAccountNumber,  PayersName, FriTekst, INP, 0, "", 
+						0.0, 0, NAD_PL, KID); 
+						
+				// Reset transaction values. 
+				transactionAmount = 0.0; 
+				refArchive = ""; 		
+				refOrderNumber = ""; 
+				payersAccountNumber = ""; 
+				PayersName = ""; 
+				NAD_PL = ""; 
+				FriTekst = ""; 
+				KID = ""; 
+				INP = ""; 
+				
+				// Prepare for the next UNH - if several Messages are concatenated. 
+				
+				currentMessageStart = 0; 
+				MessageIdentifier = ""; 
+			else
+				throw "Unidentified code in CREMUL file: " + subSegStart; 
+			end if
+		end if
+	end for
+	
+	if ( MessageIdentifier != "") then
+		throw "CREMUL File is not complete. Last segment not terminated with Message Trailer (UNT)"; 
+	end if
+	
+/*
+
+If we arrive here, the parsing is successfull, but we haven't done anything to the database yet. Lets update the database. 
+
+Use the data arrays for header, sequences and transactions to insert into tables. 
+The data is allready in SQL VALUES format in the three arrays dataMH, dataSQ, and dataTR. 
+
+Use the "implode" function to merge the arrays and insert all records for that table using one INSERT statement. 
+	INSERT INTO TABLE (field list) VALUES ( record 1 data ),(record 2 data),(record 3 data),(record 4 data)...
+
+*/
+	// Return to the calling script what references are in the file. 
+	$$MessageRefs = implode ("\r", References); 
+	// Header
+	string res = ExecuteSQL ( "INSERT INTO PaymentMessage (MessageRef, MessageDate, FileName,FilePath, ImportedTimeStamp, ImportedBy) VALUES " + 
+	implode ( ",", dataMH)); 
+	
+	// sequences
+   	string res2 = ExecuteSQL ( "INSERT INTO PaymentSequences (MessageRef, LIN, NETSProcessingDate, BusCategory,
+		SequenceAmounth, SequenceBankreference, ValDate, ReceiversAccountNumber) VALUES " + 
+   	implode ( ",", dataSQ)); 
+	
+	// Transactions
+    string SQL3 =  "INSERT INTO PaymentTransaction (MessageRef, LIN_ID, SequneceNo, ReceivedDate, ArkivRef, 
+		OppdragRef, TransfAmounth, PayerAccountNumber, PayerName, Freetext, INP, Proc, DocRef, ProcAmounth, GeneralIndicator, KID, Faktura_nr, 
+		Betalingsmaate, Betaling_signatur) VALUES " + implode ( ",", dataTR); 
+   	string res3 = ExecuteSQL (SQL3); 
+	/* dump sql to a desktop file for debug purposes 
+	string cc = delete_file ( desktop_directory()+"dumpfile.txt" ); 
+	int dd = open (desktop_directory()+"dumpfile.txt", "w"); 
+	write ( dd, SQL3); 
+	write ( dd, "\nRES:" + res3 ); 
+	close ( dd ) ; 
+	*/
+	// convert KIDs to invoicenumbers. 
+	int z, noz = sizeof ( KIDs); 
+	string KidRegex = InvoiceHeader_Preferences::KidExtractInvocieNumberRegex; 
+	
+	for ( z=1, noz)
+	 	KIDs[z]= regex_replace ( KidRegex, KIDs[z], "\1"); 
+	end for
+	// Update InvoiceHeader 
+	string sql4 = "UPDATE InvoiceHeader SET in_Sum_innbetalt = Sum_innbetalt, in_Saldo = Saldo WHERE Faktura_nr IN (" + implode(",", KIDs) + ")"; 
+	print sql4; 
+	string res4 = ExecuteSQL (sql4); 
+	
+	// Did the SQL stuff go fine ? 
+	if ( res == "" && res2 == "" && res3 == "" && res4 == "") then
+		return "OK"; 
+	end if
+	
+	return format ( "ERROR SQL Insert res (MH): %s, (SQ): %s, (TR):%s (InvoiceHeader:%s)\n", res, res2, res3, res4); 
+end
+
+function import_cremul_select_file ()
+	string FileName = select_file ("Select a CREMUL FILE?", desktop_directory()); 
+	if ( FileName != "") then
+		return import_cremul ( FileName );
+	end if
+	return "OK"; // user cancelled the File Selcet Dialogue. 
+end
