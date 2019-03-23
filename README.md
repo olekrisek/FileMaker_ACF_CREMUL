@@ -7,6 +7,14 @@ The Import Module is written in the ACF language ( Advanced Custom Functions for
 
 The FileMaker database needs three tables:  ( Some of the fields are named in Norwegian, if translated to another language, the ACF function need to be updated as well )
 
+## Table Occurence references
+The function references a preference field at table occurrence: *InvoiceHeader_Preferences::KidExtractInvocieNumberRegex* - this field is referenced two places in the source. This is a regular expression to extract the invoice number from the KID. Typical value: 
+```
+^0(\d{5})\d$
+``` 
+This means a zero + 5 digit invoice number and a control digit. The name must be adjusted to fit your preference table occurrence in your application. 
+
+
 ## Table structure
 
 - PaymentMessage
